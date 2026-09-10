@@ -1,0 +1,30 @@
+# Environment variables / secrets
+.env
+*.env
+
+# Python virtual environments
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Testing / linting caches
+.pytest_cache/
+.ruff_cache/
+
+# IDE / OS
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Frontend
+node_modules/
+dist/
+
+# Local runtime files
+*.pid

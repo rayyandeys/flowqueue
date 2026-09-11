@@ -21,9 +21,13 @@ PROCESS_ID = os.getpid()
 CONSUMER_NAME = f"{HOSTNAME}-{PROCESS_ID}"
 
 
-redis_client = Redis(
-    host="localhost",
-    port=6379,
+redis_url = os.getenv(
+    "REDIS_URL",
+    "redis://localhost:6379/0",
+)
+
+redis_client = Redis.from_url(
+    redis_url,
     decode_responses=True,
     socket_timeout=None,
     socket_connect_timeout=5,

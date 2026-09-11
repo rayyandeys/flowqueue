@@ -317,3 +317,16 @@ FlowQueue was built as a system-design and backend-engineering project exploring
 ## Future Work
 
 Possible extensions include worker heartbeats, Prometheus metrics, Grafana dashboards, scheduled jobs, rate limiting, task timeouts, queue observability, authentication, Kubernetes deployment, and autoscaling based on queue depth.
+
+## Live Deployment
+
+FlowQueue is deployed on Render with separate API, PostgreSQL, Redis/Valkey, and worker services.
+
+### Public API
+
+https://flowqueue-api.onrender.com
+
+Health check:
+
+```bash
+curl https://flowqueue-api.onrender.com/health

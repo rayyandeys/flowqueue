@@ -1,5 +1,8 @@
 import json
+import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from redis.exceptions import (
@@ -24,6 +27,11 @@ from tasks import TASKS
 RECOVERY_INTERVAL_SECONDS = 5
 CLAIM_IDLE_TIME_MS = 10000
 
+WORKER_CONCURRENCY = max(
+    1,
+    int(os.getenv("WORKER_CONCURRENCY", "5")),
+)
+
 
 def create_consumer_groups() -> None:
     for stream_name in PRIORITY_STREAMS:
@@ -36,13 +44,13 @@ def create_consumer_groups() -> None:
             )
 
             print(
-                f"✅ Consumer group created for {stream_name}"
+                f"Consumer group created for {stream_name}"
             )
 
         except ResponseError as exc:
             if "BUSYGROUP" in str(exc):
                 print(
-                    f"✅ Consumer group already exists for {stream_name}"
+                    f"Consumer group already exists for {stream_name}"
                 )
             else:
                 raise
@@ -220,7 +228,7 @@ def process_message(
 
     if not job_id:
         print(
-            f"❌ Message {message_id} has no job_id."
+            f"Message {message_id} has no job_id."
         )
 
         acknowledge_message(
@@ -237,12 +245,12 @@ def process_message(
 
     if recovered:
         print(
-            f"\n♻️ Recovered stale {priority.upper()} job {job_id}"
+            f"\nRecovered stale {priority.upper()} job {job_id}"
         )
 
     else:
         print(
-            f"\n📦 Received {priority.upper()} job {job_id}"
+            f"\nReceived {priority.upper()} job {job_id}"
         )
 
     job = get_job(
@@ -251,7 +259,7 @@ def process_message(
 
     if job is None:
         print(
-            f"❌ Job {job_id} does not exist in PostgreSQL."
+            f"Job {job_id} does not exist in PostgreSQL."
         )
 
         acknowledge_message(
@@ -285,7 +293,7 @@ def process_message(
         )
 
         print(
-            f"☠️ Unknown task moved to DLQ: {task_name}"
+            f"Unknown task moved to DLQ: {task_name}"
         )
 
         return
@@ -296,7 +304,7 @@ def process_message(
     )
 
     print(
-        f"▶️ Job {job_id} is now running."
+        f"Job {job_id} is now running."
     )
 
     try:
@@ -315,7 +323,7 @@ def process_message(
         )
 
         print(
-            f"🎉 Job {job_id} succeeded and was acknowledged."
+            f"Job {job_id} succeeded and was acknowledged."
         )
 
     except Exception as exc:
@@ -332,7 +340,7 @@ def process_message(
         )
 
         print(
-            f"❌ Job {job_id} failed: {exc}"
+            f"Job {job_id} failed: {exc}"
         )
 
         if (
@@ -350,11 +358,11 @@ def process_message(
             )
 
             print(
-                f"🔁 Retry {next_retry_count}/{max_retries}"
+                f"Retry {next_retry_count}/{max_retries}"
             )
 
             print(
-                f"⏳ Waiting {delay} seconds before retry..."
+                f"Waiting {delay} seconds before retry..."
             )
 
             time.sleep(
@@ -373,7 +381,7 @@ def process_message(
             )
 
             print(
-                f"♻️ Job {job_id} re-enqueued "
+                f"Job {job_id} re-enqueued "
                 f"to {job['priority'].upper()} queue."
             )
 
@@ -401,11 +409,11 @@ def process_message(
             )
 
             print(
-                f"☠️ Job {job_id} exhausted all retries."
+                f"Job {job_id} exhausted all retries."
             )
 
             print(
-                f"📨 Moved to DLQ as {dead_letter_id}"
+                f"Moved to DLQ as {dead_letter_id}"
             )
 
 
@@ -432,7 +440,7 @@ def recover_stream(
 
         for message_id, message in messages:
             print(
-                f"🔎 Found stale pending message "
+                f"Found stale pending message "
                 f"{message_id} in {stream_name}"
             )
 
@@ -445,7 +453,7 @@ def recover_stream(
 
     except ResponseError as exc:
         print(
-            f"⚠️ Recovery error on {stream_name}: {exc}"
+            f"Recovery error on {stream_name}: {exc}"
         )
 
 
@@ -487,24 +495,28 @@ def read_next_job() -> tuple | None:
 
 def worker_loop() -> None:
     print(
-        f"\n🚀 Worker started as '{CONSUMER_NAME}'."
+        f"\nWorker started as '{CONSUMER_NAME}'."
     )
 
     print(
-        "📡 Priority order:"
+        "Priority order:"
     )
 
     print(
-        "   CRITICAL → HIGH → NORMAL → LOW"
+        "   CRITICAL -> HIGH -> NORMAL -> LOW"
     )
 
     print(
-        f"♻️ Crash recovery checks every "
+        f"Worker concurrency: {WORKER_CONCURRENCY}"
+    )
+
+    print(
+        f"Crash recovery checks every "
         f"{RECOVERY_INTERVAL_SECONDS} seconds."
     )
 
     print(
-        f"🕒 Pending messages idle for "
+        f"Pending messages idle for "
         f"{CLAIM_IDLE_TIME_MS / 1000:.0f}+ seconds "
         f"can be reclaimed."
     )
@@ -515,62 +527,123 @@ def worker_loop() -> None:
 
     last_recovery_check = 0.0
 
-    while True:
+    slots = threading.Semaphore(
+        WORKER_CONCURRENCY
+    )
+
+    active_jobs = 0
+    active_jobs_lock = threading.Lock()
+
+    executor = ThreadPoolExecutor(
+        max_workers=WORKER_CONCURRENCY,
+        thread_name_prefix="flowqueue-worker",
+    )
+
+    def run_job(
+        stream_name: str,
+        message_id: str,
+        message: dict,
+    ) -> None:
+        nonlocal active_jobs
+
         try:
-            current_time = (
-                time.time()
-            )
-
-            if (
-                current_time
-                - last_recovery_check
-                >= RECOVERY_INTERVAL_SECONDS
-            ):
-                recover_stale_messages()
-
-                last_recovery_check = (
-                    current_time
-                )
-
-            job_message = (
-                read_next_job()
-            )
-
-            if (
-                job_message
-                is None
-            ):
-                continue
-
-            (
-                stream_name,
-                message_id,
-                message,
-            ) = job_message
-
             process_message(
                 stream_name,
                 message_id,
                 message,
             )
 
-        except TimeoutError:
-            print(
-                "⚠️ Redis read timeout. Retrying..."
-            )
+        finally:
+            with active_jobs_lock:
+                active_jobs -= 1
 
-            time.sleep(
-                1
-            )
+            slots.release()
 
-        except ConnectionError:
-            print(
-                "⚠️ Redis connection lost. Retrying..."
-            )
+    try:
+        while True:
+            try:
+                current_time = (
+                    time.time()
+                )
 
-            time.sleep(
-                2
-            )
+                with active_jobs_lock:
+                    current_active_jobs = (
+                        active_jobs
+                    )
+
+                if (
+                    current_active_jobs == 0
+                    and current_time
+                    - last_recovery_check
+                    >= RECOVERY_INTERVAL_SECONDS
+                ):
+                    recover_stale_messages()
+
+                    last_recovery_check = (
+                        current_time
+                    )
+
+                slots.acquire()
+
+                try:
+                    job_message = (
+                        read_next_job()
+                    )
+
+                except Exception:
+                    slots.release()
+                    raise
+
+                if job_message is None:
+                    slots.release()
+                    continue
+
+                (
+                    stream_name,
+                    message_id,
+                    message,
+                ) = job_message
+
+                with active_jobs_lock:
+                    active_jobs += 1
+
+                try:
+                    executor.submit(
+                        run_job,
+                        stream_name,
+                        message_id,
+                        message,
+                    )
+
+                except Exception:
+                    with active_jobs_lock:
+                        active_jobs -= 1
+
+                    slots.release()
+                    raise
+
+            except TimeoutError:
+                print(
+                    "Redis read timeout. Retrying..."
+                )
+
+                time.sleep(
+                    1
+                )
+
+            except ConnectionError:
+                print(
+                    "Redis connection lost. Retrying..."
+                )
+
+                time.sleep(
+                    2
+                )
+
+    finally:
+        executor.shutdown(
+            wait=True
+        )
 
 
 def main() -> None:
@@ -581,7 +654,7 @@ def main() -> None:
 
     except KeyboardInterrupt:
         print(
-            "\n🛑 Worker stopped."
+            "\nWorker stopped."
         )
 
 
